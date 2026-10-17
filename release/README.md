@@ -4,6 +4,8 @@
 
 - **GitHub（推荐，直链）**：
   <https://github.com/linpigeon/vscode-bg-profile-sync/releases/download/v2.1.1/local.bg-profile-sync-2.1.1.vsix>
+- **Gitea**（release 里也挂了资产）：
+  <https://git.pigeon-lin.top/lin/vscode-bg-profile-sync/releases/tag/v2.1.1>
 - **GitCode**（点开页面上的下载按钮；GitCode 的 raw 直链会返回 HTML 而不是二进制）：
   <https://gitcode.com/gcw_Dt5aZ2Tj/vscode-bg-profile-sync/blob/main/release/local.bg-profile-sync-2.1.1.vsix>
 

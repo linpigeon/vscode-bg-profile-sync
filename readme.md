@@ -2,7 +2,9 @@
 
 > 仓库：[GitHub](https://github.com/linpigeon/vscode-bg-profile-sync) ·
 > [GitCode](https://gitcode.com/gcw_Dt5aZ2Tj/vscode-bg-profile-sync) ·
-> Gitea（`git.pigeon-lin.top`）
+> [Gitea](https://git.pigeon-lin.top/lin/vscode-bg-profile-sync)
+> · 发布：[GitHub v2.1.1](https://github.com/linpigeon/vscode-bg-profile-sync/releases/tag/v2.1.1) /
+> [Gitea v2.1.1](https://git.pigeon-lin.top/lin/vscode-bg-profile-sync/releases/tag/v2.1.1)
 
 `shalldie.background` 的背景图是注入到 **VS Code 安装目录**里的
 `out/vs/code/electron-browser/workbench/workbench.html`，这个文件是全局唯一的；

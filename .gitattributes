@@ -1,0 +1,7 @@
+# 统一换行符，避免 Windows/Linux 上 diff 噪音
+* text=auto eol=lf
+
+# 二进制
+*.vsix binary
+*.png binary
+*.ico binary

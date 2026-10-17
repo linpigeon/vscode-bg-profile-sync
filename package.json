@@ -1,0 +1,87 @@
+{
+  "name": "bg-profile-sync",
+  "displayName": "Background Profile Sync",
+  "description": "让 shalldie.background 的背景图跟随 VS Code 配置文件(profile)自动切换。",
+  "publisher": "local",
+  "version": "2.1.1",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/linpigeon/vscode-bg-profile-sync.git"
+  },
+  "homepage": "https://github.com/linpigeon/vscode-bg-profile-sync#readme",
+  "bugs": {
+    "url": "https://github.com/linpigeon/vscode-bg-profile-sync/issues"
+  },
+  "keywords": [
+    "vscode",
+    "vscode-extension",
+    "background",
+    "background-image",
+    "profile",
+    "profiles"
+  ],
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "extensionKind": [
+    "ui"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "bgProfileSync.syncNow",
+        "title": "立即同步背景",
+        "category": "Background Profile Sync"
+      },
+      {
+        "command": "bgProfileSync.diagnose",
+        "title": "诊断：打印当前同步状态",
+        "category": "Background Profile Sync"
+      }
+    ],
+    "configuration": {
+      "title": "Background Profile Sync",
+      "properties": {
+        "bgProfileSync.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "窗口启动时检查安装目录里注入的背景是否与当前配置文件的 `background.*` 配置一致，不一致就自动重写（必要时自动重载窗口一次）。"
+        },
+        "bgProfileSync.emptyBehavior": {
+          "type": "string",
+          "enum": [
+            "clear",
+            "keep"
+          ],
+          "default": "clear",
+          "enumDescriptions": [
+            "当前配置文件没有配置任何背景图时，清掉背景（推荐）。",
+            "当前配置文件没有配置背景图时，保持现有背景不变。"
+          ],
+          "markdownDescription": "当前配置文件没有配置背景图时的行为。"
+        },
+        "bgProfileSync.syncMode": {
+          "type": "string",
+          "enum": [
+            "loader",
+            "html"
+          ],
+          "default": "loader",
+          "enumDescriptions": [
+            "注入一个稳定加载器，背景 CSS 由扩展写到安装目录的 JSON 里，加载器定时读取（约 120ms 生效）。换配置文件/改配置都不需要重载窗口。",
+            "旧行为：直接把配置写进 workbench.html，改完需要重载窗口一次。配了 background.editor 或 loader 失效时用它兜底。"
+          ],
+          "markdownDescription": "背景同步方式。`loader` = 零重载（推荐），`html` = 旧行为（每次改配置重载一次）。"
+        }
+      }
+    }
+  }
+}

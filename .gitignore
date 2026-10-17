@@ -1,0 +1,10 @@
+# 构建产物（发布用的 vsix 走 release 资产）
+dist/
+
+# 运行时备份（install 前后自动生成，含本机完整 workbench.html）
+.backup/
+
+# 依赖 / 临时文件
+node_modules/
+*.tmp
+.bg-profile-sync-*.tmp

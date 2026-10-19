@@ -53,12 +53,31 @@ if (loader.present) {
   try {
     const payload = JSON.parse(fs.readFileSync(targets.payloadPath, 'utf8'));
     const stat = fs.statSync(targets.payloadPath);
-    console.log(
-      '            hash=' + payload.hash + ' frames=' + (payload.frames || []).length +
-      ' interval=' + payload.interval + ' random=' + payload.random +
-      (payload.debug ? '  [debug=true 测试标记]' : '') +
-      '  mtime=' + stat.mtime.toLocaleString('zh-CN')
-    );
+    if (payload.entries) {
+      const names = Object.keys(payload.profiles || {});
+      console.log(
+        '            v' + payload.version + ' 多配置文件：profiles=' + names.length +
+        ' entries=' + Object.keys(payload.entries).length +
+        ' fallback=' + String(payload.fallback).slice(0, 8) +
+        (payload.debug ? '  [debug=true]' : '') +
+        '  mtime=' + stat.mtime.toLocaleString('zh-CN')
+      );
+      for (const name of names) {
+        const entry = payload.entries[payload.profiles[name]] || {};
+        console.log(
+          '            ' + (name + ':').padEnd(13) +
+          ' hash=' + String(payload.profiles[name]).slice(0, 8) +
+          ' frames=' + (entry.frames || []).length
+        );
+      }
+    } else {
+      console.log(
+        '            hash=' + payload.hash + ' frames=' + (payload.frames || []).length +
+        ' interval=' + payload.interval + ' random=' + payload.random +
+        (payload.debug ? '  [debug=true 测试标记]' : '') +
+        '  mtime=' + stat.mtime.toLocaleString('zh-CN')
+      );
+    }
   } catch (e) {
     console.log('            (payload 不存在或解析失败)');
   }

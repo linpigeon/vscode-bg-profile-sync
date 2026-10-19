@@ -3,7 +3,7 @@
   "displayName": "Background Profile Sync",
   "description": "让 shalldie.background 的背景图跟随 VS Code 配置文件(profile)自动切换。",
   "publisher": "local",
-  "version": "2.1.1",
+  "version": "2.3.1",
   "license": "MIT",
   "repository": {
     "type": "git",

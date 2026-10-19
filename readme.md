@@ -38,7 +38,23 @@ workbench.html  ──(注入一次，含 stderr 抑制/主题变量/加载器)�
 | **+80ms 内** | 加载器读到新 JSON，换掉 `<style>`，**背景切过去 —— 没有第二次重载** |
 
 改配置（比如把 `opacity` 从 0.2 调到 0.4）同理：写 JSON → 加载器套用，**连窗口都不用重载**。
-实测：手动改 JSON 后 **149ms** 生效（旧版要弹「点击应用」+ 重载）。
+实测：手动改 JSON 后 **45ms** 生效（旧版要弹「点击应用」+ 重载）。
+
+### 多窗口：每个窗口用自己的配置文件
+
+payload 不是"一份背景"，而是**所有配置文件的地图**：`entries`（哈希 → CSS 帧，相同配置去重）
++ `profiles`（配置文件名字 → 哈希）+ `fallback`（当前窗口的哈希）。渲染进程从窗口标题认出自己：
+
+```
+扩展: xxx - UniversityReminder - TypeScript - Visual Studio Code
+                                  ^^^^^^^^^^ 倒数第二段 = profile 名
+```
+
+VS Code 默认标题模板是 `${activeEditorShort} - ${rootName} - ${profileName} - ${appName}`，
+所以按倒数第二段匹配 `profiles` 表；匹配上就**锁定**（不重载就不会换 profile，切文件导致的标题变化不影响），
+锁不上才用 `fallback`（= 最后写 payload 的那个窗口的配置，即旧行为）。
+
+结论：**多个窗口各显示自己配置文件的壁纸，互不干扰**。
 
 ### `html`（旧行为，兜底）
 
@@ -72,9 +88,9 @@ CSS 通过 `<style>.textContent` 套用 —— 全程不碰 `require`、不碰 T
 
 ```powershell
 # 装进 Default 配置文件
-& "D:\Microsoft VS Code\bin\code.cmd" --install-extension .\local.bg-profile-sync-2.1.1.vsix --force
+& "D:\Microsoft VS Code\bin\code.cmd" --install-extension .\local.bg-profile-sync-2.3.1.vsix --force
 # 或装进指定配置文件（会同时建好该配置文件）
-& "D:\Microsoft VS Code\bin\code.cmd" --profile Python --install-extension .\local.bg-profile-sync-2.1.1.vsix --force
+& "D:\Microsoft VS Code\bin\code.cmd" --profile Python --install-extension .\local.bg-profile-sync-2.3.1.vsix --force
 ```
 
 命令行脚本（`status.js` / `restore.js` / `build-vsix.ps1` / `install-vsix.ps1`）会自动探测
@@ -114,9 +130,9 @@ VS Code 大版本升级会换安装目录，同样会在升级后第一次打开
 ## 已知限制
 
 1. **首次安装 / VS Code 升级后会有一次重载**：要把 html 里的注入块换成加载器，这一次绕不过去。
-2. **多个窗口共享同一份 JSON**：已经加载的窗口也会跟着变成"最后同步的那个 profile"的背景
-   （这是共享安装目录 + 共享 payload 的必然结果）。如果你经常同时开多个不同 profile 的窗口
-   且要各自不同，把 `bgProfileSync.syncMode` 设成 `html`（旧行为：各自窗口保持自己的）。
+2. **多窗口靠标题识别 profile**：如果你自定义了 `window.title` 且去掉了 `${profileName}`，
+   窗口就认不出自己，会退回"最后写 payload 的那个 profile"的旧行为（仍然是零重载，只是可能串台）。
+   另外 Default 配置文件不显示 profile 名，也会走 fallback。
 3. **`background.editor` 段**：loader 模式不渲染它（会自动切到 html 模式，代价是一次重载）。
 4. **别在 `shalldie.background` 里点「应用」**：它会把注入块重写成静态的，覆盖加载器；
    我们会在下一次窗口加载时自动装回加载器（代价是一次重载）。它装不装都不影响本扩展读配置。
@@ -130,7 +146,7 @@ VS Code 大版本升级会换安装目录，同样会在升级后第一次打开
 node status.js
 ```
 
-打印模式（loader v2 / html）、payload 的 hash/帧数/mtime，以及每个配置文件的
+打印模式（loader v4 / html）、payload 的 hash/帧数/mtime，以及每个配置文件的
 `bgExt / config / 一致 / 就位 / 状态 / 图片 / hash`。
 
 `node restore.js` 会清掉 html 里的注入块**并删掉 payload 文件**（自动备份 html）。
@@ -148,7 +164,7 @@ node restore.js              # 还原 workbench.html + 删除 payload
 | :--- | :--- |
 | `sync.js` | 纯逻辑：读配置、拼 `vscode-file` 地址、判断一致性、生成注入块/加载器/payload、校验与原子写入 |
 | `extension.js` | 扩展入口：两种模式的同步流程、配置变更监听、输出面板、诊断命令 |
-| `test/run-tests.js` | 单元 + 端到端测试（用真实 `workbench.html` 和真实 profile 配置，58 个用例） |
+| `test/run-tests.js` | 单元 + 端到端测试（用真实 `workbench.html` 和真实 profile 配置，63 个用例） |
 | `build-vsix.ps1` / `install-vsix.ps1` / `uninstall.ps1` | 打包 / 安装 / 卸载 |
 | `status.js` / `restore.js` | 诊断 / 还原 |
 | `.backup/` | 第一次改动前手工留的 `workbench.html` 备份（扩展自己的备份在 globalStorage） |
@@ -157,6 +173,17 @@ node restore.js              # 还原 workbench.html + 删除 payload
 > JS 里读配置/写文件都不依赖外部包。
 
 ## 版本历史
+
+### 2.3.1
+
+- 修正 storage.json 路径（实际在 <userData>/User/globalStorage/ 下），否则只认出 Default 一个配置文件。
+
+### 2.3.0
+
+- **多窗口各用各的背景**：payload 改成「所有配置文件的地图」（`entries` + `profiles` + `fallback`），
+  渲染进程按窗口标题里的 profile 名挑自己那份并锁定；标题认不出来才退回旧行为。
+- 加载器 v4（旧格式 payload 仍兼容）；配置文件列表直接从用户目录枚举（`User/settings.json` +
+  `profiles/*/settings.json`，名字取自 `globalStorage/storage.json`）。
 
 ### 2.1.1
 

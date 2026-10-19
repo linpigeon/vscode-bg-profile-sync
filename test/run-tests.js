@@ -452,6 +452,67 @@ async function main() {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  await test('loader：按窗口标题选出配置文件的哈希', () => {
+    const profiles = { Default: 'h-default', 'C#': 'h-csharp', TypeScript: 'h-ts', Python: 'h-py' };
+    assert.strictEqual(
+      sync.pickProfileHash('扩展: ES7+ React/Redux - UniversityReminder - TypeScript - Visual Studio Code', profiles, 'h-fb'),
+      'h-ts'
+    );
+    assert.strictEqual(sync.pickProfileHash('欢迎 - C# - Visual Studio Code', profiles, 'h-fb'), 'h-csharp');
+    // 文件夹名和 profile 名撞车时，优先倒数第二段（profile 位）
+    assert.strictEqual(sync.pickProfileHash('index.ts - Python - TypeScript - Visual Studio Code', profiles, 'h-fb'), 'h-ts');
+    assert.strictEqual(sync.pickProfileHash('foo - bar - Visual Studio Code', profiles, 'h-fb'), 'h-fb');
+    assert.strictEqual(sync.pickProfileHash('', profiles, 'h-fb'), 'h-fb');
+    assert.strictEqual(sync.pickProfileHash('x - y', null, 'h-fb'), 'h-fb');
+    assert.strictEqual(sync.pickProfileHash('f - typescript - Visual Studio Code', profiles, 'h-fb'), 'h-ts');
+  });
+
+  await test('loader：多配置文件 payload 结构 / 去重 / fallback', () => {
+    const a = stateFrom({ fullscreen: { images: [imgA], opacity: 0.2 } });
+    const b = stateFrom({ fullscreen: { images: [imgB], opacity: 0.3 } });
+    const c = stateFrom({ fullscreen: { images: [imgA], opacity: 0.2 } }); // 和 a 完全相同
+    const payload = sync.buildMultiPayload(a, [
+      { name: 'A', state: a },
+      { name: 'B', state: b },
+      { name: 'C', state: c },
+    ]);
+    assert.strictEqual(payload.version, sync.LOADER_VERSION);
+    assert.deepStrictEqual(Object.keys(payload.profiles).sort(), ['A', 'B', 'C']);
+    assert.strictEqual(Object.keys(payload.entries).length, 2, 'A/C 同哈希只存一份');
+    assert.strictEqual(payload.profiles.A, payload.profiles.C);
+    assert.strictEqual(payload.fallback, a.hash);
+    assert.ok(payload.entries[payload.profiles.B].frames[0].includes(sync.toVscodeFileUrl(imgB)));
+  });
+
+  await test('loader：从用户目录枚举配置文件', () => {
+    const root = path.join(tmpRoot, 'userdata');
+    fs.mkdirSync(path.join(root, 'User', 'profiles', 'aaa'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'User', 'globalStorage'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'User', 'settings.json'), JSON.stringify({ 'background.fullscreen': { images: [imgA] } }));
+    fs.writeFileSync(
+      path.join(root, 'User', 'profiles', 'aaa', 'settings.json'),
+      JSON.stringify({ 'background.fullscreen': { images: [imgB], opacity: 0.4 } })
+    );
+    fs.writeFileSync(
+      path.join(root, 'User', 'globalStorage', 'storage.json'),
+      JSON.stringify({ userDataProfiles: [{ name: 'Alpha', location: 'aaa' }] })
+    );
+
+    const gs = path.join(root, 'User', 'globalStorage', 'local.bg-profile-sync');
+    assert.strictEqual(sync.userDataDirFromGlobalStorage(gs), root);
+    const list = sync.listProfiles(root);
+    assert.deepStrictEqual(list.map((item) => item.name), ['Default', 'Alpha']);
+
+    const states = list.map((item) => ({
+      name: item.name,
+      state: sync.settingsState(JSON.parse(fs.readFileSync(item.settingsFile, 'utf8'))),
+    }));
+    const payload = sync.buildMultiPayload(states[1].state, states);
+    assert.deepStrictEqual(Object.keys(payload.profiles).sort(), ['Alpha', 'Default']);
+    assert.strictEqual(payload.fallback, states[1].state.hash);
+    assert.notStrictEqual(payload.profiles.Default, payload.profiles.Alpha);
+  });
+
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 
   if (!real) {
@@ -638,6 +699,45 @@ async function main() {
         assert.strictEqual(payload.hash, otherState.hash, 'payload 应该换成新 profile 的');
         assert.ok(payload.frames.length > 0);
       }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    await test('端到端 loader：payload 写成多配置文件地图（按标题选）', async () => {
+      const state = sync.readState(configFromSettings(loaderProfile.settings));
+      const { tmpDir, appRoot, htmlPath } = tempAppRoot(sync.htmlCleared(originalHtml));
+      // 造一个假的用户目录树：Default + Alpha
+      const userData = path.join(tmpDir, 'userdata');
+      fs.mkdirSync(path.join(userData, 'User', 'profiles', 'p1'), { recursive: true });
+      fs.mkdirSync(path.join(userData, 'User', 'globalStorage'), { recursive: true });
+      fs.writeFileSync(path.join(userData, 'User', 'settings.json'), JSON.stringify({ 'background.fullscreen': { images: [imgA] } }));
+      fs.writeFileSync(
+        path.join(userData, 'User', 'profiles', 'p1', 'settings.json'),
+        JSON.stringify({ 'background.fullscreen': { images: [imgB], opacity: 0.4 } })
+      );
+      fs.writeFileSync(
+        path.join(userData, 'User', 'globalStorage', 'storage.json'),
+        JSON.stringify({ userDataProfiles: [{ name: 'Alpha', location: 'p1' }] })
+      );
+
+      const context = makeContext();
+      context.globalStorageUri = { fsPath: path.join(userData, 'User', 'globalStorage', 'local.bg-profile-sync') };
+      const stub = makeStubVscode({
+        settings: loaderProfile.settings,
+        appRoot,
+        hasBgExtension: loaderProfile.hasBgExtension,
+        htmlPath,
+        state,
+        syncMode: 'loader',
+      });
+      await loadExtensionWithStub(stub.stub).activate(context);
+
+      const payload = JSON.parse(fs.readFileSync(sync.loaderTargets(appRoot).payloadPath, 'utf8'));
+      assert.strictEqual(payload.version, sync.LOADER_VERSION);
+      assert.deepStrictEqual(Object.keys(payload.profiles).sort(), ['Alpha', 'Default'], 'payload 应该包含所有配置文件');
+      assert.strictEqual(payload.fallback, state.hash, 'fallback 应该是当前窗口的配置');
+      assert.ok(payload.entries[payload.profiles.Alpha], 'Alpha 的 entry 应该在');
+      assert.ok(payload.entries[payload.profiles.Default], 'Default 的 entry 应该在');
+      assert.notStrictEqual(payload.profiles.Alpha, payload.profiles.Default, '两张背景不同');
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 

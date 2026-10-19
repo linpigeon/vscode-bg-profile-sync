@@ -702,7 +702,7 @@ function htmlWithOwnBlock(html, state, options) {
  * 它定时 fetch app 目录里的 bg-profile-sync.json（只读，不写），把里面的 CSS 帧写进 <style>。
  * 扩展只改这个 JSON —— 换 profile 不再重写 html，也就不再需要重载窗口。
  */
-const LOADER_VERSION = 3;
+const LOADER_VERSION = 4;
 const LOADER_MARK = 'bg-profile-sync-loader';
 
 /** 刚加载的头 20 秒用 80ms 轮询（正好覆盖切 profile 后扩展写 payload 的那一段），之后 400ms */
@@ -770,25 +770,144 @@ function buildFrames(state) {
   return { frames, interval, random };
 }
 
-/** 加载器要读的 JSON（内容只跟配置有关，不含时间戳，方便比较是否变化） */
+// ---------------------------------------------------------------- payload
+
+/** Default 配置文件在 payload 里的名字 */
+const DEFAULT_PROFILE_NAME = 'Default';
+
+/**
+ * 渲染进程靠窗口标题判断自己是哪个配置文件：VS Code 默认标题模板是
+ * `${activeEditorShort} - ${rootName} - ${profileName} - ${appName}`，
+ * 所以倒数第二段就是 profile 名。匹配不上就退回 fallback（最后写 payload 的那个窗口的配置）。
+ *
+ * 注意：这个函数会被 String(fn) 原样内联进加载器脚本，**不能引用任何外部变量**。
+ */
+function pickProfileHash(title, profiles, fallback) {
+  if (!profiles) {
+    return fallback;
+  }
+  var segments = String(title || '').split(' - ');
+  var candidates = [];
+  if (segments.length >= 2) {
+    candidates.push(segments[segments.length - 2]);
+  }
+  for (var i = segments.length - 2; i >= 0; i--) {
+    candidates.push(segments[i]);
+  }
+  var lookup = {};
+  for (var name in profiles) {
+    lookup[name.toLowerCase()] = name;
+  }
+  for (var c = 0; c < candidates.length; c++) {
+    var key = String(candidates[c]).replace(/^\s+|\s+$/g, '').toLowerCase();
+    if (key && lookup[key] !== undefined) {
+      return profiles[lookup[key]];
+    }
+  }
+  return fallback;
+}
+
+/** <userData>/User/globalStorage/<ext-id> → <userData> */
+function userDataDirFromGlobalStorage(globalStoragePath) {
+  if (!globalStoragePath) {
+    return null;
+  }
+  return path.resolve(globalStoragePath, '..', '..', '..');
+}
+
+/** 枚举所有配置文件（读磁盘，Default 在最前面） */
+function listProfiles(userDataDir) {
+  const out = [];
+  if (!userDataDir) {
+    return out;
+  }
+  out.push({ name: DEFAULT_PROFILE_NAME, settingsFile: path.join(userDataDir, 'User', 'settings.json') });
+  let storage = null;
+  try {
+    // 注意：storage.json 在 <userData>/User/globalStorage/ 下（不是 <userData>/globalStorage/）
+    storage = JSON.parse(fs.readFileSync(path.join(userDataDir, 'User', 'globalStorage', 'storage.json'), 'utf8'));
+  } catch (e) {
+    storage = null;
+  }
+  for (const item of (storage && storage.userDataProfiles) || []) {
+    if (!item || !item.name || !item.location) {
+      continue;
+    }
+    out.push({
+      name: item.name,
+      settingsFile: path.join(userDataDir, 'User', 'profiles', item.location, 'settings.json'),
+    });
+  }
+  return out;
+}
+
+/** 从一份 settings.json 的对象读出状态（和扩展里 getConfiguration 的结果等价） */
+function settingsState(settings) {
+  const source = settings && typeof settings === 'object' ? settings : {};
+  return readState({ get: (key) => source['background.' + key] });
+}
+
+/** 单个配置文件的 CSS 条目 */
+function buildEntry(state) {
+  return state.enabled ? buildFrames(state) : { frames: [], interval: 0, random: false };
+}
+
+/** 单配置文件 payload（枚举失败时的兜底，加载器也兼容这种旧格式） */
 function buildPayload(state) {
-  const built = state.enabled ? buildFrames(state) : { frames: [], interval: 0, random: false };
+  const entry = buildEntry(state);
   return {
     version: LOADER_VERSION,
     hash: state.hash,
-    interval: built.interval,
-    random: built.random,
-    frames: built.frames,
+    interval: entry.interval,
+    random: entry.random,
+    frames: entry.frames,
   };
 }
 
-function payloadText(state) {
-  return JSON.stringify(buildPayload(state), null, 2) + '\n';
+/**
+ * 多配置文件 payload：
+ *   entries  : 哈希 → CSS 帧（相同配置只存一份）
+ *   profiles : 配置文件名字 → 哈希（渲染进程用标题里的名字查这张表）
+ *   fallback : 当前窗口的哈希（标题匹配不上时兜底，等于旧的"最后写者胜"）
+ */
+function buildMultiPayload(currentState, profileStates) {
+  const entries = {};
+  const profiles = {};
+  const add = (name, state) => {
+    if (!state) {
+      return;
+    }
+    if (!entries[state.hash]) {
+      entries[state.hash] = buildEntry(state);
+    }
+    if (name) {
+      profiles[name] = state.hash;
+    }
+  };
+  for (const item of profileStates || []) {
+    add(item.name, item.state);
+  }
+  add(null, currentState);
+  const current = currentState ? buildEntry(currentState) : { frames: [], interval: 0, random: false };
+  return {
+    version: LOADER_VERSION,
+    entries: entries,
+    profiles: profiles,
+    fallback: currentState ? currentState.hash : null,
+    // 兼容 loader v3（它只认顶层 frames）：已经打开的旧窗口读到新 payload 时不会清空背景
+    hash: currentState ? currentState.hash : null,
+    interval: current.interval,
+    random: current.random,
+    frames: current.frames,
+  };
 }
 
-/** 写入 payload；内容没变就不写。返回是否真的写了 */
-function writePayload(payloadPath, state) {
-  const text = payloadText(state);
+function serializePayload(payload) {
+  return JSON.stringify(payload, null, 2) + '\n';
+}
+
+/** 写入 payload 文本；内容没变就不写。返回是否真的写了 */
+function writePayloadText(payloadPath, text) {
   let current = null;
   try {
     current = fs.readFileSync(payloadPath, 'utf8');
@@ -803,7 +922,12 @@ function writePayload(payloadPath, state) {
   return true;
 }
 
-/** 注入的加载器脚本：fetch 同一份 JSON，把 CSS 帧套到 <style id="bg-profile-sync-style"> 上 */
+/** 单配置文件 payload 写入（兼容旧调用） */
+function writePayload(payloadPath, state) {
+  return writePayloadText(payloadPath, serializePayload(buildPayload(state)));
+}
+
+/** 注入的加载器脚本：fetch 同一份 JSON，按窗口标题挑出自己配置文件的 CSS 帧 */
 function buildLoaderScript(payloadUrl) {
   return [
     '(function () {',
@@ -813,6 +937,8 @@ function buildLoaderScript(payloadUrl) {
     '  var applied = "";',
     '  var rotation = null;',
     '  var savedTitle = null;',
+    '  var locked = null;',
+    '  var pickProfileHash = ' + pickProfileHash.toString() + ';',
     '  function styleEl() {',
     '    var el = document.getElementById("bg-profile-sync-style");',
     '    if (!el) {',
@@ -822,30 +948,50 @@ function buildLoaderScript(payloadUrl) {
     '    }',
     '    return el;',
     '  }',
-    '  function apply(payload) {',
-    '    if (!payload || !payload.frames || !payload.frames.length) {',
+    '  function resolveEntry(payload) {',
+    '    if (!payload) { return null; }',
+    '    if (!payload.entries) { return { hash: payload.hash, name: null, entry: payload }; }',
+    '    var profiles = payload.profiles || {};',
+    '    var hash = null;',
+    '    var name = null;',
+    '    if (locked && profiles[locked]) {',
+    '      name = locked;',
+    '      hash = profiles[locked];',
+    '    } else {',
+    '      hash = pickProfileHash(String(document.title || ""), profiles, payload.fallback || null);',
+    '      for (var n in profiles) {',
+    '        if (profiles[n] === hash) { name = n; break; }',
+    '      }',
+    '      if (name) { locked = name; }',
+    '    }',
+    '    return { hash: hash, name: name, entry: (payload.entries || {})[hash] || null };',
+    '  }',
+    '  function apply(resolved, debug) {',
+    '    var entry = resolved && resolved.entry ? resolved.entry : null;',
+    '    var frames = entry && entry.frames ? entry.frames : [];',
+    '    var key = String(resolved && resolved.hash) + "/" + frames.length + "/" + frames.join("\\u0000");',
+    '    if (key !== applied) {',
+    '      applied = key;',
     '      if (rotation) { clearInterval(rotation); rotation = null; }',
-    '      if (applied !== "") { applied = ""; styleEl().textContent = ""; }',
-    '      return;',
-    '    }',
-    '    var key = String(payload.hash) + "/" + payload.frames.length + "/" + payload.frames.join("\\u0000");',
-    '    if (key === applied) { return; }',
-    '    applied = key;',
-    '    var el = styleEl();',
-    '    var index = 0;',
-    '    function show() { el.textContent = payload.frames[index % payload.frames.length]; }',
-    '    if (rotation) { clearInterval(rotation); rotation = null; }',
-    '    show();',
-    '    if (payload.frames.length > 1 && payload.interval > 0) {',
-    '      rotation = setInterval(function () {',
-    '        index = payload.random ? Math.floor(Math.random() * payload.frames.length) : index + 1;',
+    '      var el = styleEl();',
+    '      var index = 0;',
+    '      function show() { el.textContent = frames[index % frames.length]; }',
+    '      if (!frames.length) {',
+    '        el.textContent = "";',
+    '      } else {',
     '        show();',
-    '      }, payload.interval * 1000);',
+    '        if (frames.length > 1 && entry.interval > 0) {',
+    '          rotation = setInterval(function () {',
+    '            index = entry.random ? Math.floor(Math.random() * frames.length) : index + 1;',
+    '            show();',
+    '          }, entry.interval * 1000);',
+    '        }',
+    '      }',
     '    }',
-    '    if (payload.debug) {',
+    '    if (debug) {',
     '      try {',
     '        if (savedTitle === null) { savedTitle = document.title; }',
-    '        document.title = "BG-SYNC:" + payload.hash;',
+    '        document.title = "BG-SYNC:" + (resolved && resolved.name ? resolved.name : "fallback") + ":" + (resolved && resolved.hash ? String(resolved.hash).slice(0, 8) : "none");',
     '      } catch (e) {}',
     '    } else if (savedTitle !== null) {',
     '      try { document.title = savedTitle; } catch (e) {}',
@@ -856,7 +1002,7 @@ function buildLoaderScript(payloadUrl) {
     '    try {',
     '      fetch(P + (P.indexOf("?") < 0 ? "?" : "&") + "t=" + Date.now(), { cache: "no-store" })',
     '        .then(function (r) { return r.json(); })',
-    '        .then(apply)',
+    '        .then(function (payload) { apply(resolveEntry(payload), payload && payload.debug); })',
     '        .catch(function () {});',
     '    } catch (e) {}',
     '    setTimeout(tick, Date.now() - started < WINDOW ? FAST : SLOW);',
@@ -950,8 +1096,17 @@ module.exports = {
   loaderTargets,
   buildFrames,
   buildPayload,
-  payloadText,
+  payloadText: serializePayload,
+  serializePayload,
   writePayload,
+  writePayloadText,
+  DEFAULT_PROFILE_NAME,
+  pickProfileHash,
+  userDataDirFromGlobalStorage,
+  listProfiles,
+  settingsState,
+  buildEntry,
+  buildMultiPayload,
   buildLoaderScript,
   buildLoaderBlock,
   assessLoader,

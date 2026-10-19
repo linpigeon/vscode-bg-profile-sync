@@ -188,12 +188,45 @@ function writePayloadFor(context, payloadPath, state, emptyBehavior) {
     return false;
   }
   try {
-    return sync.writePayload(payloadPath, state);
+    const payload = buildPayloadForEnvironment(context, state);
+    return sync.writePayloadText(payloadPath, sync.serializePayload(payload));
   } catch (error) {
     log(context, '写 payload 失败: ' + (error && error.stack ? error.stack : error));
     warnWriteError(context, error);
     return false;
   }
+}
+
+/**
+ * payload = 所有配置文件的 CSS 地图 + 当前窗口的兜底哈希。
+ * 渲染进程按窗口标题里的 profile 名挑自己那份，所以多个窗口可以各用各的背景。
+ * 枚举不到配置文件时退回单配置文件 payload（旧的"最后写者胜"行为）。
+ */
+function buildPayloadForEnvironment(context, state) {
+  const userData = sync.userDataDirFromGlobalStorage(
+    context.globalStorageUri ? context.globalStorageUri.fsPath : null
+  );
+  const profileStates = [];
+  for (const profile of sync.listProfiles(userData)) {
+    try {
+      const settings = JSON.parse(fs.readFileSync(profile.settingsFile, 'utf8'));
+      profileStates.push({ name: profile.name, state: sync.settingsState(settings) });
+    } catch (error) {
+      // 该 profile 还没有 settings.json（新建但没写过），跳过
+    }
+  }
+  if (!profileStates.length) {
+    log(context, '枚举不到配置文件 settings.json，payload 退回单配置文件模式');
+    return sync.buildPayload(state);
+  }
+  const payload = sync.buildMultiPayload(state, profileStates);
+  log(
+    context,
+    'payload: profiles=' + Object.keys(payload.profiles).length +
+    ' entries=' + Object.keys(payload.entries).length +
+    ' fallback=' + String(payload.fallback).slice(0, 8)
+  );
+  return payload;
 }
 
 // ---------------------------------------------------------------- html 模式（兜底）
@@ -374,7 +407,17 @@ async function diagnose(context) {
       const stat = fs.statSync(targets.payloadPath);
       lines.push('payload 状态   : ' + stat.size + ' 字节, mtime=' + stat.mtime.toISOString());
       const payload = JSON.parse(fs.readFileSync(targets.payloadPath, 'utf8'));
-      lines.push('payload 内容   : hash=' + payload.hash + ' frames=' + (payload.frames || []).length + ' interval=' + payload.interval + ' random=' + payload.random);
+      if (payload.entries) {
+        const names = Object.keys(payload.profiles || {});
+        lines.push('payload 内容   : 多配置文件，profiles=' + names.length + ' entries=' + Object.keys(payload.entries).length);
+        lines.push('  fallback     : ' + String(payload.fallback).slice(0, 12) + '（标题匹配不上时用）');
+        for (const name of names) {
+          const entry = payload.entries[payload.profiles[name]] || {};
+          lines.push('  ' + (name + ':').padEnd(14) + ' hash=' + String(payload.profiles[name]).slice(0, 8) + ' frames=' + (entry.frames || []).length + ' interval=' + entry.interval);
+        }
+      } else {
+        lines.push('payload 内容   : 单配置文件（旧格式），hash=' + payload.hash + ' frames=' + (payload.frames || []).length);
+      }
     } catch (e) {
       lines.push('payload 状态   : 不存在或解析失败');
     }

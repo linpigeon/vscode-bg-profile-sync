@@ -28,22 +28,25 @@ workbench.html  ──(注入一次，含 stderr 抑制/主题变量/加载器)�
                                                      <style id="bg-profile-sync-style"> CSS </style>
 ```
 
-切 profile 的时间线（实测）：
+切 profile 的时间线（**实测 + 查 VS Code 源码**）：
 
 | 时刻 | 发生什么 |
 | :--- | :--- |
-| 0s | 你选「切换配置文件」，**VS Code 自己**重载窗口（这一步我们管不了） |
-| ~1-2s | 窗口起来，加载器开始轮询，先读到的是上一个 profile 的 JSON |
-| ~1.5-2s | 新窗口的扩展宿主启动，把当前 profile 的 CSS 写进 JSON |
-| **+80ms 内** | 加载器读到新 JSON，换掉 `<style>`，**背景切过去 —— 没有第二次重载** |
+| 0s | 你选「切换配置文件」。**本地窗口里 VS Code 不重载窗口**，只 `startExtensionHosts()` 重启扩展宿主（`changeCurrentProfile()` 里只有 remote 才会 `reload()`） |
+| ~50-300ms | 配置生效、窗口标题里的 `${profileName}` 更新（title service 订阅了 `onDidChangeCurrentProfile`） |
+| **≤400ms** | 加载器下一次轮询读到新标题，认出新的 profile，换掉 `<style>` —— **背景切过去，全程零重载** |
+| ~1-2s | 新扩展宿主激活本扩展，把 JSON（含所有 profile）重写一遍，加载器无事可做 |
 
 改配置（比如把 `opacity` 从 0.2 调到 0.4）同理：写 JSON → 加载器套用，**连窗口都不用重载**。
 实测：手动改 JSON 后 **45ms** 生效（旧版要弹「点击应用」+ 重载）。
 
+> 轮询节奏：窗口加载后 20 秒内 80ms，之后 400ms。刚重载完的窗口是 80ms，长期开着的窗口是 400ms
+> ——所以切 profile 最多等 400ms。只有**首次安装 / VS Code 升级**需要一次窗重载（装 loader）。
+
 ### 多窗口：每个窗口用自己的配置文件
 
 payload 不是"一份背景"，而是**所有配置文件的地图**：`entries`（哈希 → CSS 帧，相同配置去重）
-+ `profiles`（配置文件名字 → 哈希）+ `fallback`（当前窗口的哈希）。渲染进程从窗口标题认出自己：
++ `profiles`（配置文件名字 → 哈希）+ `fallback`（最后写 payload 的那个窗口的哈希）。渲染进程从窗口标题认出自己：
 
 ```
 扩展: xxx - UniversityReminder - TypeScript - Visual Studio Code
@@ -51,10 +54,14 @@ payload 不是"一份背景"，而是**所有配置文件的地图**：`entries`
 ```
 
 VS Code 默认标题模板是 `${activeEditorShort} - ${rootName} - ${profileName} - ${appName}`，
-所以按倒数第二段匹配 `profiles` 表；匹配上就**锁定**（不重载就不会换 profile，切文件导致的标题变化不影响），
-锁不上才用 `fallback`（= 最后写 payload 的那个窗口的配置，即旧行为）。
+所以按倒数第二段匹配 `profiles` 表。规则：
 
-结论：**多个窗口各显示自己配置文件的壁纸，互不干扰**。
+- 标题里认出的 profile 变了（**切换配置文件**）→ 跟着换
+- 标题变了但没认出别的 profile（切文件/文件夹）→ 保持不动
+- 标题还没渲染出来 + 3 秒宽限期内 → 什么都不做（不闪别人的图、不误锁）
+- 超过宽限期还认不出（比如自定义了不含 `${profileName}` 的 `window.title`）→ 用 `fallback`
+
+结论：**多个窗口各显示自己配置文件的壁纸，互不干扰；在任一窗口里切 profile，只有那个窗口跟着换。**
 
 ### `html`（旧行为，兜底）
 
@@ -88,9 +95,9 @@ CSS 通过 `<style>.textContent` 套用 —— 全程不碰 `require`、不碰 T
 
 ```powershell
 # 装进 Default 配置文件
-& "D:\Microsoft VS Code\bin\code.cmd" --install-extension .\local.bg-profile-sync-2.3.2.vsix --force
+& "D:\Microsoft VS Code\bin\code.cmd" --install-extension .\local.bg-profile-sync-2.3.4.vsix --force
 # 或装进指定配置文件（会同时建好该配置文件）
-& "D:\Microsoft VS Code\bin\code.cmd" --profile Python --install-extension .\local.bg-profile-sync-2.3.2.vsix --force
+& "D:\Microsoft VS Code\bin\code.cmd" --profile Python --install-extension .\local.bg-profile-sync-2.3.4.vsix --force
 ```
 
 命令行脚本（`status.js` / `restore.js` / `build-vsix.ps1` / `install-vsix.ps1`）会自动探测
@@ -173,6 +180,19 @@ node restore.js              # 还原 workbench.html + 删除 payload
 > JS 里读配置/写文件都不依赖外部包。
 
 ## 版本历史
+
+### 2.3.4
+
+- 去掉测试专用的 `debug` 标题钩子（它会把窗口标题改成 `BG-SYNC:…`，忘了关标题就卡住）。加载器 v7。
+
+### 2.3.3
+
+- **修「在窗口里切配置文件、壁纸不换」**：本地切换配置文件时 VS Code 只重启扩展宿主、
+  **不重载窗口**（源码 `changeCurrentProfile()` 里只有 remote 才 `reload()`），渲染进程还锁在旧 profile 上。
+  现在加载器每次轮询都会读标题：标题里的 profile 变成另一个已知 profile 就跟过去
+  （只认已知 profile 名，切文件/文件夹不会乱跳）。实测：把某窗口的 `window.title` 临时改成显示别的
+  profile，壁纸立刻跟随；改回来也跟随。
+- 顺带确认：本地切 profile 全程**零重载**（此前文档里"VS Code 自己会重载一次"的说法是错的）。
 
 ### 2.3.2
 

@@ -496,12 +496,33 @@ async function main() {
     assert.strictEqual(hit.locked, 'TypeScript');
     assert.strictEqual(hit.resolved.entry.frames[0], 'TS-CSS');
 
-    // 标题后来变了（切文件/文件夹）也不换
-    const later = sync.resolveProfile({ payload, title: 'x - PlO - Visual Studio Code', locked: 'TypeScript', elapsed: 9000, grace: 3000 });
+    // 标题变了但没认出别的 profile（切文件/文件夹） -> 保持锁定
+    const later = sync.resolveProfile({ payload, title: 'README.md - UniversityReminder - Visual Studio Code', locked: 'TypeScript', elapsed: 9000, grace: 3000 });
     assert.strictEqual(later.locked, 'TypeScript');
     assert.strictEqual(later.resolved.hash, 'h-ts');
   });
 
+  await test('loader：本地切换配置文件（不重载窗口，只有标题变）时跟着换', () => {
+    const payload = {
+      version: 6,
+      entries: { 'h-ts': { frames: ['TS-CSS'] }, 'h-py': { frames: ['PY-CSS'] } },
+      profiles: { TypeScript: 'h-ts', Python: 'h-py' },
+      fallback: 'h-ts',
+    };
+    // 一开始在 TypeScript 窗口，锁定 TypeScript
+    const first = sync.resolveProfile({ payload, title: '欢迎 - TypeScript - Visual Studio Code', locked: null, elapsed: 50, grace: 3000 });
+    assert.strictEqual(first.locked, 'TypeScript');
+    assert.strictEqual(first.resolved.entry.frames[0], 'TS-CSS');
+
+    // 用户在同一个窗口切到 Python：窗口不重载，只有标题变了
+    const switched = sync.resolveProfile({ payload, title: '欢迎 - Python - Visual Studio Code', locked: 'TypeScript', elapsed: 60000, grace: 3000 });
+    assert.strictEqual(switched.locked, 'Python', '应该跟着标题换成 Python');
+    assert.strictEqual(switched.resolved.entry.frames[0], 'PY-CSS');
+
+    // 切回 TypeScript
+    const back = sync.resolveProfile({ payload, title: '欢迎 - TypeScript - Visual Studio Code', locked: 'Python', elapsed: 61000, grace: 3000 });
+    assert.strictEqual(back.locked, 'TypeScript');
+  });
   await test('loader：锁定的 profile 从 payload 消失后退回重新识别', () => {
     const payload = {
       version: 5,
@@ -513,6 +534,14 @@ async function main() {
     assert.strictEqual(out.locked, 'PlO');
   });
 
+  await test('loader：注入的脚本能被 JS 解析（语法自检）', () => {
+    const url = 'vscode-file://vscode-app/d%3A/x/bg-profile-sync.json';
+    assert.doesNotThrow(() => new Function(sync.buildLoaderScript(url)), 'loader 脚本语法必须正确');
+    const block = sync.buildLoaderBlock(url, '3.1.0');
+    const inner = block.slice(block.indexOf('<script>') + 8, block.lastIndexOf('</script>'));
+    assert.ok(inner.includes('bg-profile-sync-loader:v' + sync.LOADER_VERSION));
+    assert.doesNotThrow(() => new Function(inner), '整块注入脚本必须可解析');
+  });
   await test('loader：旧格式 payload（没有 entries）直接用它', () => {
     const payload = { version: 3, hash: 'h1', frames: ['OLD-CSS'], interval: 0, random: false };
     const out = sync.resolveProfile({ payload, title: '', locked: null, elapsed: 0, grace: 3000 });

@@ -702,7 +702,7 @@ function htmlWithOwnBlock(html, state, options) {
  * 它定时 fetch app 目录里的 bg-profile-sync.json（只读，不写），把里面的 CSS 帧写进 <style>。
  * 扩展只改这个 JSON —— 换 profile 不再重写 html，也就不再需要重载窗口。
  */
-const LOADER_VERSION = 5;
+const LOADER_VERSION = 7;
 const LOADER_MARK = 'bg-profile-sync-loader';
 
 /** 刚加载的头 20 秒用 80ms 轮询（正好覆盖切 profile 后扩展写 payload 的那一段），之后 400ms */
@@ -816,11 +816,13 @@ function pickProfileName(title, profiles) {
  * 决定这个窗口该用哪份 CSS。纯函数，便于单测；同样会被内联进加载器脚本。
  *
  * 规则（顺序很重要）：
- *   1. 已经锁定 -> 用锁定的 profile
- *   2. 标题里认出 profile -> 锁定并用它
- *   3. 认不出（多半是标题还没渲染出来）且还在 grace 期内 -> **什么都不返回**
- *      （既不闪一张别人的图，也绝不能因为 fallback 哈希恰好等于某个 profile 的哈希就锁错人）
- *   4. 超过 grace 还认不出 -> 用 fallback（= 最后写 payload 的窗口的配置，即旧行为）
+ *   1. 标题里的 profile 名和已锁定的不同 -> 说明切换了配置文件（**本地切换不重载窗口**，
+ *      只重启扩展宿主），跟着换
+ *   2. 已经锁定且标题没变 -> 用锁定的 profile（切文件/文件夹不影响）
+ *   3. 还没锁定、标题能认出 profile -> 锁定并用它
+ *   4. 认不出（多半是标题还没渲染出来）且还在 grace 期内 -> **什么都不返回**
+ *      （既不闪别人的图，也绝不能因为 fallback 哈希恰好等于某个 profile 的哈希就锁错人）
+ *   5. 超过 grace 还认不出 -> 用 fallback（= 最后写 payload 的窗口的配置，即旧行为）
  */
 function resolveProfile(input) {
   var payload = input.payload;
@@ -836,11 +838,11 @@ function resolveProfile(input) {
   if (locked && !profiles[locked]) {
     locked = null; // 这个 profile 被删了
   }
-  if (!locked) {
-    var matched = pickProfileName(String(input.title || ''), profiles);
-    if (matched) {
-      locked = matched;
-    }
+  var matched = pickProfileName(String(input.title || ''), profiles);
+  // 关键：本地切换配置文件不会重载窗口，标题会从旧 profile 名变成新 profile 名。
+  // 只有「新名字是已知 profile」时才认作切换，避免切文件/文件夹时乱跳。
+  if (matched && matched !== locked) {
+    locked = matched;
   }
   if (locked) {
     return {
@@ -991,7 +993,6 @@ function buildLoaderScript(payloadUrl) {
     '  var started = Date.now();',
     '  var applied = "";',
     '  var rotation = null;',
-    '  var savedTitle = null;',
     '  var locked = null;',
     '  var GRACE = ' + LOADER_GRACE_MS + ';',
     '  var pickProfileName = ' + pickProfileName.toString() + ';',
@@ -1005,7 +1006,7 @@ function buildLoaderScript(payloadUrl) {
     '    }',
     '    return el;',
     '  }',
-    '  function apply(resolved, debug) {',
+    '  function apply(resolved) {',
     '    if (!resolved) { return; }',
     '    var entry = resolved.entry ? resolved.entry : null;',
     '    var frames = entry && entry.frames ? entry.frames : [];',
@@ -1028,15 +1029,6 @@ function buildLoaderScript(payloadUrl) {
     '        }',
     '      }',
     '    }',
-    '    if (debug) {',
-    '      try {',
-    '        if (savedTitle === null) { savedTitle = document.title; }',
-    '        document.title = "BG-SYNC:" + (resolved && resolved.name ? resolved.name : "fallback") + ":" + (resolved && resolved.hash ? String(resolved.hash).slice(0, 8) : "none");',
-    '      } catch (e) {}',
-    '    } else if (savedTitle !== null) {',
-    '      try { document.title = savedTitle; } catch (e) {}',
-    '      savedTitle = null;',
-    '    }',
     '  }',
     '  function tick() {',
     '    try {',
@@ -1051,7 +1043,7 @@ function buildLoaderScript(payloadUrl) {
     '            grace: GRACE',
     '          });',
     '          locked = out.locked;',
-    '          apply(out.resolved, payload && payload.debug);',
+    '          apply(out.resolved);',
     '        })',
     '        .catch(function () {});',
     '    } catch (e) {}',

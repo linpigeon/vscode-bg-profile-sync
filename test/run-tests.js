@@ -452,19 +452,71 @@ async function main() {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  await test('loader：按窗口标题选出配置文件的哈希', () => {
+  await test('loader：从窗口标题认出配置文件名字', () => {
     const profiles = { Default: 'h-default', 'C#': 'h-csharp', TypeScript: 'h-ts', Python: 'h-py' };
     assert.strictEqual(
-      sync.pickProfileHash('扩展: ES7+ React/Redux - UniversityReminder - TypeScript - Visual Studio Code', profiles, 'h-fb'),
-      'h-ts'
+      sync.pickProfileName('扩展: ES7+ React/Redux - UniversityReminder - TypeScript - Visual Studio Code', profiles),
+      'TypeScript'
     );
-    assert.strictEqual(sync.pickProfileHash('欢迎 - C# - Visual Studio Code', profiles, 'h-fb'), 'h-csharp');
+    assert.strictEqual(sync.pickProfileName('欢迎 - C# - Visual Studio Code', profiles), 'C#');
     // 文件夹名和 profile 名撞车时，优先倒数第二段（profile 位）
-    assert.strictEqual(sync.pickProfileHash('index.ts - Python - TypeScript - Visual Studio Code', profiles, 'h-fb'), 'h-ts');
-    assert.strictEqual(sync.pickProfileHash('foo - bar - Visual Studio Code', profiles, 'h-fb'), 'h-fb');
-    assert.strictEqual(sync.pickProfileHash('', profiles, 'h-fb'), 'h-fb');
-    assert.strictEqual(sync.pickProfileHash('x - y', null, 'h-fb'), 'h-fb');
-    assert.strictEqual(sync.pickProfileHash('f - typescript - Visual Studio Code', profiles, 'h-fb'), 'h-ts');
+    assert.strictEqual(sync.pickProfileName('index.ts - Python - TypeScript - Visual Studio Code', profiles), 'TypeScript');
+    // 认不出必须返回 null（返回哈希会被误锁）
+    assert.strictEqual(sync.pickProfileName('foo - bar - Visual Studio Code', profiles), null);
+    assert.strictEqual(sync.pickProfileName('', profiles), null);
+    assert.strictEqual(sync.pickProfileName('TypeScript - Visual Studio Code', null), null);
+    assert.strictEqual(sync.pickProfileName('f - typescript - Visual Studio Code', profiles), 'TypeScript');
+  });
+
+  await test('loader：标题还没出来时绝不能锁到 fallback 的 profile（线上 bug 回归）', () => {
+    const payload = {
+      version: 5,
+      entries: { 'h-ts': { frames: ['TS-CSS'] }, 'h-plo': { frames: ['PLO-CSS'] } },
+      profiles: { TypeScript: 'h-ts', PlO: 'h-plo' },
+      fallback: 'h-plo',
+    };
+    const early = sync.resolveProfile({ payload, title: '', locked: null, elapsed: 100, grace: 3000 });
+    assert.strictEqual(early.resolved, null, 'grace 期内认不出就什么都别做');
+    assert.strictEqual(early.locked, null, '绝不能锁定');
+
+    const late = sync.resolveProfile({ payload, title: '', locked: null, elapsed: 4000, grace: 3000 });
+    assert.strictEqual(late.locked, null, '超过 grace 也不锁定');
+    assert.strictEqual(late.resolved.hash, 'h-plo', '超过 grace 才用 fallback');
+    assert.strictEqual(late.resolved.entry.frames[0], 'PLO-CSS');
+  });
+
+  await test('loader：标题出现后锁定自己的 profile，之后不再改变', () => {
+    const payload = {
+      version: 5,
+      entries: { 'h-ts': { frames: ['TS-CSS'] }, 'h-plo': { frames: ['PLO-CSS'] } },
+      profiles: { TypeScript: 'h-ts', PlO: 'h-plo' },
+      fallback: 'h-plo',
+    };
+    const hit = sync.resolveProfile({ payload, title: '欢迎 - TypeScript - Visual Studio Code', locked: null, elapsed: 50, grace: 3000 });
+    assert.strictEqual(hit.locked, 'TypeScript');
+    assert.strictEqual(hit.resolved.entry.frames[0], 'TS-CSS');
+
+    // 标题后来变了（切文件/文件夹）也不换
+    const later = sync.resolveProfile({ payload, title: 'x - PlO - Visual Studio Code', locked: 'TypeScript', elapsed: 9000, grace: 3000 });
+    assert.strictEqual(later.locked, 'TypeScript');
+    assert.strictEqual(later.resolved.hash, 'h-ts');
+  });
+
+  await test('loader：锁定的 profile 从 payload 消失后退回重新识别', () => {
+    const payload = {
+      version: 5,
+      entries: { 'h-plo': { frames: ['PLO-CSS'] } },
+      profiles: { PlO: 'h-plo' },
+      fallback: 'h-plo',
+    };
+    const out = sync.resolveProfile({ payload, title: '欢迎 - PlO - Visual Studio Code', locked: 'Gone', elapsed: 9000, grace: 3000 });
+    assert.strictEqual(out.locked, 'PlO');
+  });
+
+  await test('loader：旧格式 payload（没有 entries）直接用它', () => {
+    const payload = { version: 3, hash: 'h1', frames: ['OLD-CSS'], interval: 0, random: false };
+    const out = sync.resolveProfile({ payload, title: '', locked: null, elapsed: 0, grace: 3000 });
+    assert.strictEqual(out.resolved.entry.frames[0], 'OLD-CSS');
   });
 
   await test('loader：多配置文件 payload 结构 / 去重 / fallback', () => {

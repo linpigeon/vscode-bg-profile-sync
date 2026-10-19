@@ -88,9 +88,9 @@ CSS 通过 `<style>.textContent` 套用 —— 全程不碰 `require`、不碰 T
 
 ```powershell
 # 装进 Default 配置文件
-& "D:\Microsoft VS Code\bin\code.cmd" --install-extension .\local.bg-profile-sync-2.3.1.vsix --force
+& "D:\Microsoft VS Code\bin\code.cmd" --install-extension .\local.bg-profile-sync-2.3.2.vsix --force
 # 或装进指定配置文件（会同时建好该配置文件）
-& "D:\Microsoft VS Code\bin\code.cmd" --profile Python --install-extension .\local.bg-profile-sync-2.3.1.vsix --force
+& "D:\Microsoft VS Code\bin\code.cmd" --profile Python --install-extension .\local.bg-profile-sync-2.3.2.vsix --force
 ```
 
 命令行脚本（`status.js` / `restore.js` / `build-vsix.ps1` / `install-vsix.ps1`）会自动探测
@@ -173,6 +173,10 @@ node restore.js              # 还原 workbench.html + 删除 payload
 > JS 里读配置/写文件都不依赖外部包。
 
 ## 版本历史
+
+### 2.3.2
+
+- **修死锁 bug**：标题还没渲染出来时，pickProfileHash 会返回 fallback 哈希，反向查找又把 locked 设成 fallback 对应的 profile，导致窗口永久串台。改成 pickProfileName（认不出返回 null）+ esolveProfile（只有标题真认出来才锁定；3 秒宽限期内认不出就什么都不做，不闪别人的图）。加载器升到 v5。
 
 ### 2.3.1
 

@@ -12,6 +12,6 @@
 安装：
 
 ```powershell
-code --install-extension .\local.bg-profile-sync-2.3.1.vsix --force
-# 装进指定配置文件：code --profile Python --install-extension .\local.bg-profile-sync-2.3.1.vsix --force
+code --install-extension .\local.bg-profile-sync-2.3.2.vsix --force
+# 装进指定配置文件：code --profile Python --install-extension .\local.bg-profile-sync-2.3.2.vsix --force
 ```

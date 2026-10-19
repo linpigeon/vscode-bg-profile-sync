@@ -702,13 +702,19 @@ function htmlWithOwnBlock(html, state, options) {
  * 它定时 fetch app 目录里的 bg-profile-sync.json（只读，不写），把里面的 CSS 帧写进 <style>。
  * 扩展只改这个 JSON —— 换 profile 不再重写 html，也就不再需要重载窗口。
  */
-const LOADER_VERSION = 4;
+const LOADER_VERSION = 5;
 const LOADER_MARK = 'bg-profile-sync-loader';
 
 /** 刚加载的头 20 秒用 80ms 轮询（正好覆盖切 profile 后扩展写 payload 的那一段），之后 400ms */
 const LOADER_FAST_MS = 80;
 const LOADER_SLOW_MS = 400;
 const LOADER_FAST_WINDOW_MS = 20000;
+
+/**
+ * 窗口标题还没渲染出来时的宽限期：这期间认不出 profile 就什么都不做，
+ * 避免"先闪一张别人的图"，也避免误锁到 fallback 对应的 profile。
+ */
+const LOADER_GRACE_MS = 3000;
 
 /** 写入（不备份）的原子写：先写临时文件再 rename */
 function writeFileAtomic(filePath, content) {
@@ -776,15 +782,14 @@ function buildFrames(state) {
 const DEFAULT_PROFILE_NAME = 'Default';
 
 /**
- * 渲染进程靠窗口标题判断自己是哪个配置文件：VS Code 默认标题模板是
- * `${activeEditorShort} - ${rootName} - ${profileName} - ${appName}`，
- * 所以倒数第二段就是 profile 名。匹配不上就退回 fallback（最后写 payload 的那个窗口的配置）。
- *
- * 注意：这个函数会被 String(fn) 原样内联进加载器脚本，**不能引用任何外部变量**。
+ * 从窗口标题里认出配置文件名字（认不出返回 null）。
+ * 依据：VS Code 默认标题模板 `${activeEditorShort} - ${rootName} - ${profileName} - ${appName}`，
+ * 所以先试倒数第二段，再从后往前扫。
+ * 注意：这个函数会被 String(fn) 内联进加载器脚本，**不能引用任何外部变量**。
  */
-function pickProfileHash(title, profiles, fallback) {
+function pickProfileName(title, profiles) {
   if (!profiles) {
-    return fallback;
+    return null;
   }
   var segments = String(title || '').split(' - ');
   var candidates = [];
@@ -801,10 +806,60 @@ function pickProfileHash(title, profiles, fallback) {
   for (var c = 0; c < candidates.length; c++) {
     var key = String(candidates[c]).replace(/^\s+|\s+$/g, '').toLowerCase();
     if (key && lookup[key] !== undefined) {
-      return profiles[lookup[key]];
+      return lookup[key];
     }
   }
-  return fallback;
+  return null;
+}
+
+/**
+ * 决定这个窗口该用哪份 CSS。纯函数，便于单测；同样会被内联进加载器脚本。
+ *
+ * 规则（顺序很重要）：
+ *   1. 已经锁定 -> 用锁定的 profile
+ *   2. 标题里认出 profile -> 锁定并用它
+ *   3. 认不出（多半是标题还没渲染出来）且还在 grace 期内 -> **什么都不返回**
+ *      （既不闪一张别人的图，也绝不能因为 fallback 哈希恰好等于某个 profile 的哈希就锁错人）
+ *   4. 超过 grace 还认不出 -> 用 fallback（= 最后写 payload 的窗口的配置，即旧行为）
+ */
+function resolveProfile(input) {
+  var payload = input.payload;
+  var locked = input.locked || null;
+  if (!payload) {
+    return { locked: locked, resolved: null };
+  }
+  if (!payload.entries) {
+    // 旧格式 payload（loader v3）：没有 profile 地图，直接用它
+    return { locked: locked, resolved: { hash: payload.hash || null, name: null, entry: payload } };
+  }
+  var profiles = payload.profiles || {};
+  if (locked && !profiles[locked]) {
+    locked = null; // 这个 profile 被删了
+  }
+  if (!locked) {
+    var matched = pickProfileName(String(input.title || ''), profiles);
+    if (matched) {
+      locked = matched;
+    }
+  }
+  if (locked) {
+    return {
+      locked: locked,
+      resolved: {
+        hash: profiles[locked],
+        name: locked,
+        entry: (payload.entries || {})[profiles[locked]] || null,
+      },
+    };
+  }
+  if (input.elapsed < input.grace) {
+    return { locked: null, resolved: null };
+  }
+  var fallback = payload.fallback || null;
+  return {
+    locked: null,
+    resolved: { hash: fallback, name: null, entry: (payload.entries || {})[fallback] || null },
+  };
 }
 
 /** <userData>/User/globalStorage/<ext-id> → <userData> */
@@ -938,7 +993,9 @@ function buildLoaderScript(payloadUrl) {
     '  var rotation = null;',
     '  var savedTitle = null;',
     '  var locked = null;',
-    '  var pickProfileHash = ' + pickProfileHash.toString() + ';',
+    '  var GRACE = ' + LOADER_GRACE_MS + ';',
+    '  var pickProfileName = ' + pickProfileName.toString() + ';',
+    '  var resolveProfile = ' + resolveProfile.toString() + ';',
     '  function styleEl() {',
     '    var el = document.getElementById("bg-profile-sync-style");',
     '    if (!el) {',
@@ -948,26 +1005,9 @@ function buildLoaderScript(payloadUrl) {
     '    }',
     '    return el;',
     '  }',
-    '  function resolveEntry(payload) {',
-    '    if (!payload) { return null; }',
-    '    if (!payload.entries) { return { hash: payload.hash, name: null, entry: payload }; }',
-    '    var profiles = payload.profiles || {};',
-    '    var hash = null;',
-    '    var name = null;',
-    '    if (locked && profiles[locked]) {',
-    '      name = locked;',
-    '      hash = profiles[locked];',
-    '    } else {',
-    '      hash = pickProfileHash(String(document.title || ""), profiles, payload.fallback || null);',
-    '      for (var n in profiles) {',
-    '        if (profiles[n] === hash) { name = n; break; }',
-    '      }',
-    '      if (name) { locked = name; }',
-    '    }',
-    '    return { hash: hash, name: name, entry: (payload.entries || {})[hash] || null };',
-    '  }',
     '  function apply(resolved, debug) {',
-    '    var entry = resolved && resolved.entry ? resolved.entry : null;',
+    '    if (!resolved) { return; }',
+    '    var entry = resolved.entry ? resolved.entry : null;',
     '    var frames = entry && entry.frames ? entry.frames : [];',
     '    var key = String(resolved && resolved.hash) + "/" + frames.length + "/" + frames.join("\\u0000");',
     '    if (key !== applied) {',
@@ -1002,7 +1042,17 @@ function buildLoaderScript(payloadUrl) {
     '    try {',
     '      fetch(P + (P.indexOf("?") < 0 ? "?" : "&") + "t=" + Date.now(), { cache: "no-store" })',
     '        .then(function (r) { return r.json(); })',
-    '        .then(function (payload) { apply(resolveEntry(payload), payload && payload.debug); })',
+    '        .then(function (payload) {',
+    '          var out = resolveProfile({',
+    '            payload: payload,',
+    '            title: String(document.title || ""),',
+    '            locked: locked,',
+    '            elapsed: Date.now() - started,',
+    '            grace: GRACE',
+    '          });',
+    '          locked = out.locked;',
+    '          apply(out.resolved, payload && payload.debug);',
+    '        })',
     '        .catch(function () {});',
     '    } catch (e) {}',
     '    setTimeout(tick, Date.now() - started < WINDOW ? FAST : SLOW);',
@@ -1101,7 +1151,9 @@ module.exports = {
   writePayload,
   writePayloadText,
   DEFAULT_PROFILE_NAME,
-  pickProfileHash,
+  pickProfileName,
+  resolveProfile,
+  LOADER_GRACE_MS,
   userDataDirFromGlobalStorage,
   listProfiles,
   settingsState,
